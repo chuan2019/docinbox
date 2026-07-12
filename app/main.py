@@ -15,7 +15,7 @@ def healthz() -> JSONResponse:
     """
     try:
         identity = get_client("sts").get_caller_identity()
-    except (CleintError, BotoCoreError) as exc:
+    except (ClientError, BotoCoreError) as exc:
         # Reaching AWS/MiniStack failed - report unhealthy, don't crash
         return JSONResponse(
             status_code=503,

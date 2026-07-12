@@ -1,4 +1,4 @@
-.PHONY: up down logs run health
+.PHONY: up down logs run health test
 
 up:		## Start MiniStack
 	docker compose up -d
@@ -14,4 +14,7 @@ run:		## Run the FastAPI app
 
 health:		## Check MiniStack + app health
 	curl -s localhost:4566/_ministack/health && echo && curl -s localhost:8000/healthz
+
+test:		## Run the test suite (mocked AWS, no MiniStack needed)
+	pytest
 
