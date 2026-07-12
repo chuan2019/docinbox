@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -43,4 +43,21 @@ def list_buckets() -> dict[str, list[str]]:
     s3 = get_client("s3")
     resp = s3.list_buckets()
     return {"buckets": [b["Name"] for b in resp["Buckets"]]}
+
+
+@app.delete("/buckets/{name}")
+def delete_bucket(name: str) -> dict[str, str]:
+    """Delete an S3 bucket. Idempotent: fine if it's already gone."""
+    s3 = get_client("s3")
+    try:
+        s3.delete_bucket(Bucket=name)
+    except s3.exceptions.NoSuchBucket:
+        pass
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "BucketNotEmpty":
+            raise HTTPException(
+                status_code=409, detail=f"bucket '{name}' is not empty"
+            ) from exc
+        raise
+    return {"deleted": name}
 
