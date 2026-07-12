@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8.2
+moto[s3,sts]>=5.0
