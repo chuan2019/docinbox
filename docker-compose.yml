@@ -1,0 +1,14 @@
+services:
+  ministack:
+    image: ministackorg/ministack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - LOG_LEVEL=INFO
+      # Keep created resources across restarts during development.
+      # (In CI you'll want these OFF for a clean slate - that's Part 10.)
+      - PERSIST_STATE=1
+      - S3_PERSIST=1
+    volumes:
+      - ./data/state:/tmp/ministack-state
+      - ./data/s3:/tmp/ministack-data/s3
