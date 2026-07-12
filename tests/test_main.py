@@ -53,3 +53,32 @@ def test_list_buckets_empty_when_none_created(client):
     resp = client.get("/buckets")
     assert resp.status_code == 200
     assert resp.json() == {"buckets": []}
+
+
+def test_delete_bucket(client):
+    client.post("/buckets/my-bucket")
+
+    resp = client.delete("/buckets/my-bucket")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": "my-bucket"}
+    assert client.get("/buckets").json() == {"buckets": []}
+
+
+def test_delete_bucket_is_idempotent_when_missing(client):
+    resp = client.delete("/buckets/never-created")
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": "never-created"}
+
+
+def test_delete_bucket_conflicts_when_not_empty(client):
+    from app.aws.clients import get_client
+
+    client.post("/buckets/my-bucket")
+    get_client("s3").put_object(Bucket="my-bucket", Key="doc.txt", Body=b"hi")
+
+    resp = client.delete("/buckets/my-bucket")
+
+    assert resp.status_code == 409
+    assert "not empty" in resp.json()["detail"]
+    assert client.get("/buckets").json() == {"buckets": ["my-bucket"]}
