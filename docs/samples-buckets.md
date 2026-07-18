@@ -1,5 +1,7 @@
 # Sample API Calls - buckets
 
+## Via the FastAPI Webservice
+
 ```bash
 chuan@chuan2025:~/Projects/Document-AI/docinbox$
 chuan@chuan2025:~/Projects/Document-AI/docinbox$ curl -X GET http://localhost:8000/healthz | jq .
@@ -77,4 +79,35 @@ chuan@chuan2025:~/Projects/Document-AI/docinbox$ curl -X GET http://localhost:80
 }
 chuan@chuan2025:~/Projects/Document-AI/docinbox$
 
+```
+
+## Via `aws` command line tool
+
+```bash
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$ export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 AWS_ENDPOINT_URL=http://localhost:4566
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$ aws s3 ls
+2026-07-18 14:47:24 inbox-uploads
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$ aws s3 mb s3://inbox-uploads-tmp
+make_bucket: inbox-uploads-tmp
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$ aws s3 ls
+2026-07-18 14:47:24 inbox-uploads
+2026-07-18 14:57:01 inbox-uploads-tmp
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$ aws s3 rm s3://inbox-uploads-tmp --recursive
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$ aws s3 ls
+2026-07-18 14:47:24 inbox-uploads
+2026-07-18 14:57:01 inbox-uploads-tmp
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$ aws s3 rb s3://inbox-uploads-tmp
+remove_bucket: inbox-uploads-tmp
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$ aws s3 ls
+2026-07-18 14:47:24 inbox-uploads
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
+chuan@chuan2025:~/Projects/Document-AI/docinbox$
 ```
