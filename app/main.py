@@ -16,7 +16,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Smart Document Inbox")
+app = FastAPI(title="Smart Document Inbox", lifespan=lifespan)
 
 
 def get_app_config() -> AppConfig:

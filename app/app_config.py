@@ -31,7 +31,7 @@ def _load_parameters(prefix: str) -> dict[str, str]:
     return params
 
 def _load_signing_key(env: str) -> SecretStr:
-    sm = get_client("Secretsmanager")
+    sm = get_client("secretsmanager")
     resp = sm.get_secret_value(SecretId=f"docinbox/{env}/signing-key")
     return SecretStr(resp["SecretString"])
 
@@ -60,6 +60,6 @@ class ConfigCache:
             self._loaded_at = time.monotonic()
         return self._config
 
-def invalidate(self) -> None:
-    """Force a re-fetch on the next get() - used by tests (and an exercise)."""
-    self._config = None
+    def invalidate(self) -> None:
+        """Force a re-fetch on the next get() - used by tests (and an exercise)."""
+        self._config = None
