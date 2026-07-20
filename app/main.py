@@ -1,10 +1,53 @@
-from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from botocore.exceptions import BotoCoreError, ClientError
-
+from app.app_config import AppConfig, ConfigCache
 from app.aws.clients import get_client
+from app.config import get_settings
 
-app = FastAPI(title="Smart Document Inbox")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Fail fast: if SSM/Secrets Manager is unreachable or a parameter is
+    # missing, the app fails at startup instead of at request time.
+    cache = ConfigCache(ttl_seconds=get_settings().config_ttl_seconds)
+    cache.get()  # first fetch happens here, at startup
+    app.state.config_cache = cache
+    yield
+
+
+app = FastAPI(title="Smart Document Inbox", lifespan=lifespan)
+
+
+def get_app_config() -> AppConfig:
+    """FastAPI dependency: current app config (cached, TTL-refreshed)."""
+    return app.state.config_cache.get()
+
+
+@app.get("/whoami")
+def whoami() -> dict[str, str]:
+    """Who does AWS think we are? (STS GetCallerIdentity)"""
+    identity = get_client("sts").get_caller_identity()
+    return {
+        "account": identity["Account"],
+        "arn": identity["Arn"],
+        "user_id": identity["UserId"],
+    }
+
+
+@app.get("/config")
+def show_config(config: AppConfig = Depends(get_app_config)) -> dict[str, str | bool]:
+    """Resolved app config - non-secret values only. Guarded by DEBUG_ROUTES."""
+    if not get_settings().debug_routes:
+        raise HTTPException(status_code=404)  # 404, not 403: don't advertise it
+    return {
+        "app_env": get_settings().app_env,
+        "bucket_name": config.bucket_name,
+        "llm_model": config.llm_model,
+        "email_digest_enabled": config.email_digest_enabled,
+        # SecretStr masks itself - this serializes as "**********".
+        "signing_key": str(config.signing_key),
+    }
 
 
 @app.get("/healthz")
