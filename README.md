@@ -4,7 +4,6 @@ Companion build for the *"Building a Smart Document Inbox on Local AWS"* tutoria
 series (MiniStack + FastAPI + Ollama). This repo is built alongside the writing
 so every part is verified working before it's published.
 
-- **Writing plan & drafts:** `~/Documents/My_Study/private-docs/aws/ministack/`
 - **Tagging convention:** one annotated tag per part (`part-01`, `part-02`, ...)
   marking the exact state a reader following that post should end up at.
 
