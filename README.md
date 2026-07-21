@@ -1,6 +1,6 @@
 # docinbox — Smart Document Inbox
 
-Companion build for the *"Building a Smart Document Inbox on Local AWS"* tutorial
+Companion build for the [*"Building a Smart Document Inbox on Local AWS"*](https://medium.com/@chuan-zhang/building-a-smart-document-inbox-on-local-aws-part-1-foundations-9ec6682bebd5) tutorial
 series (MiniStack + FastAPI + Ollama). This repo is built alongside the writing
 so every part is verified working before it's published.
 
