@@ -35,8 +35,17 @@ def aws():
 
 @pytest.fixture
 def client(aws):
-    """FastAPI TestClient wired to the moto-mocked AWS backend."""
+    """FastAPI TestClient wired to the moto-mocked AWS backend.
+
+    The lifespan loads AppConfig from SSM + Secrets Manager at startup,
+    so the mocked backend must be seeded before the app boots.
+    """
+    from bootstrap.seed import seed_parameters, seed_signing_key
     from app.main import app
+
+    env = get_settings().app_env
+    seed_parameters(env)
+    seed_signing_key(env)
 
     with TestClient(app) as test_client:
         yield test_client

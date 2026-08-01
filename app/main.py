@@ -1,10 +1,14 @@
-from contextlib import asynccontextmanager
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from contextlib import AsyncExitStack, asynccontextmanager
+from fastapi import Depends, FastAPI, HTTPException, File, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 from botocore.exceptions import BotoCoreError, ClientError
+import uuid
+
 from app.app_config import AppConfig, ConfigCache
 from app.aws.clients import get_client
 from app.config import get_settings
+from app.aws.aclients import open_async_client
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -13,7 +17,11 @@ async def lifespan(app: FastAPI):
     cache = ConfigCache(ttl_seconds=get_settings().config_ttl_seconds)
     cache.get()  # first fetch happens here, at startup
     app.state.config_cache = cache
-    yield
+
+    async with AsyncExitStack() as stack:
+        app.state.s3 = await open_async_client(stack, "s3")
+        yield
+    # the stack closes app.state.s3's aiohttp session on shutdown
 
 
 app = FastAPI(title="Smart Document Inbox", lifespan=lifespan)
@@ -104,3 +112,109 @@ def delete_bucket(name: str) -> dict[str, str]:
         raise
     return {"deleted": name}
 
+
+@app.post("/documents", status_code=201)
+async def upload_document(
+    file: UploadFile = File(...),
+    config: AppConfig = Depends(get_app_config)
+) -> dict[str, str]:
+    """
+    Upload a document to S3. The document id is a new key, not the filename.
+    """
+    document_id = str(uuid.uuid4())
+    content_type = file.content_type or "application/octet-stream"
+
+    # upload_fileobj picks simple vs multipart based on size - we don't.
+    await app.state.s3.upload_fileobj(
+        file.file,
+        config.bucket_name,
+        document_id,
+        ExtraArgs={
+            "ContentType": content_type,
+            "Metadata": {"filename": file.filename or "unnamed"},
+        }
+    )
+    return {
+        "document_id": document_id,
+        "filename": file.filename or "unnamed",
+        "content_type": content_type,
+    }
+
+
+@app.get("/documents")
+async def list_documents(
+    config: AppConfig = Depends(get_app_config)
+) -> dict[str, list[dict[str, str | int]]]:
+    """
+    List documents in the S3 bucket.
+    """
+    resp = await app.state.s3.list_objects_v2(Bucket=config.bucket_name)
+    documents = [
+        {
+            "document_id": obj["Key"],
+            "size": obj["Size"],
+            "last_modified": obj["LastModified"].isoformat(),
+        }
+        for obj in resp.get("Contents", [])
+    ]
+    return {"documents": documents}
+
+
+@app.get("/documents/{document_id}/download")
+async def download_document(
+    document_id: str,
+    config: AppConfig = Depends(get_app_config)
+) -> StreamingResponse:
+    """
+    Generate a presigned URL to download a document from S3.
+    """
+    try:
+        obj = await app.state.s3.get_object(
+            Bucket=config.bucket_name,
+            Key=document_id
+        )
+    except app.state.s3.exceptions.NoSuchKey as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"document '{document_id}' not found"
+        ) from exc
+
+    filename = obj.get("Metadata", {}).get("filename", document_id)
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    if "ContentLength" in obj:
+        headers["Content-Length"] = str(obj["ContentLength"])
+
+    return StreamingResponse(
+        content=obj["Body"].iter_chunks(),
+        media_type=obj.get("ContentType", "application/octet-stream"),
+        headers=headers,
+    )
+
+
+@app.get("/documents/{document_id}/download_url")
+async def download_document_url(
+    document_id: str,
+    config: AppConfig = Depends(get_app_config)
+) -> dict[str, str | int]:
+    """
+    HeadObject confirms the key exists before we hand out a URL for it.
+    """
+    try:
+        await app.state.s3.head_object(
+            Bucket=config.bucket_name,
+            Key=document_id,
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "404":
+            raise HTTPException(
+                status_code=404,
+                detail=f"document '{document_id}' not found"
+            ) from exc
+        raise
+
+    url = await app.state.s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": config.bucket_name, "Key": document_id},
+        ExpiresIn=300,
+    )
+    return {"url": url, "expires_in": 300}
