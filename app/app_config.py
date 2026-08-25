@@ -12,6 +12,7 @@ from app.config import get_settings
 class AppConfig(BaseModel):
     """Validated application configuration."""
     bucket_name: str
+    table_name: str
     llm_model: str
     email_digest_enabled: bool
     signing_key: SecretStr  # renders as '**********' in logs and repr
@@ -41,6 +42,7 @@ def load_app_config() -> AppConfig:
     params = _load_parameters(f"/docinbox/{env}")
     return AppConfig(
         bucket_name=params["s3/bucket-name"],
+        table_name=params["dynamodb/table-name"],
         llm_model=params["llm/model-name"],
         email_digest_enabled=params.get("features/email-digest") == "true",
         signing_key=_load_signing_key(env),

@@ -1,13 +1,18 @@
+import uuid
+import base64
+import json
 from contextlib import AsyncExitStack, asynccontextmanager
-from fastapi import Depends, FastAPI, HTTPException, File, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, File, UploadFile, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from botocore.exceptions import BotoCoreError, ClientError
-import uuid
+from pydantic import BaseModel as RequestModel
 
 from app.app_config import AppConfig, ConfigCache
 from app.aws.clients import get_client
 from app.config import get_settings
 from app.aws.aclients import open_async_client
+from app.models import DocumentRecord, DocumentStatus
+from app.repository import DocumentRepository, StatusConflictError
 
 
 @asynccontextmanager
@@ -20,6 +25,7 @@ async def lifespan(app: FastAPI):
 
     async with AsyncExitStack() as stack:
         app.state.s3 = await open_async_client(stack, "s3")
+        app.state.dynamodb = await open_async_client(stack, "dynamodb")
         yield
     # the stack closes app.state.s3's aiohttp session on shutdown
 
@@ -30,6 +36,11 @@ app = FastAPI(title="Smart Document Inbox", lifespan=lifespan)
 def get_app_config() -> AppConfig:
     """FastAPI dependency: current app config (cached, TTL-refreshed)."""
     return app.state.config_cache.get()
+
+
+def get_repository(config: AppConfig = Depends(get_app_config)) -> DocumentRepository:
+    """FastAPI dependency: a repository bound to the live client + table name."""
+    return DocumentRepository(app.state.dynamodb, config.table_name)
 
 
 @app.get("/whoami")
@@ -116,48 +127,113 @@ def delete_bucket(name: str) -> dict[str, str]:
 @app.post("/documents", status_code=201)
 async def upload_document(
     file: UploadFile = File(...),
-    config: AppConfig = Depends(get_app_config)
-) -> dict[str, str]:
+    x_owner: str = Header("demo@example.com", alias="X-Owner"),
+    config: AppConfig = Depends(get_app_config),
+    repo: DocumentRepository = Depends(get_repository),
+) -> DocumentRecord:
     """
     Upload a document to S3. The document id is a new key, not the filename.
     """
-    document_id = str(uuid.uuid4())
-    content_type = file.content_type or "application/octet-stream"
-
-    # upload_fileobj picks simple vs multipart based on size - we don't.
+    record = DocumentRecord(
+        document_id=str(uuid.uuid4()),
+        owner=x_owner,
+        filename=file.filename or "unnamed",
+        content_type=file.content_type or "application/octet-stream",
+        size=file.size or 0,
+    )
+    # S3 keeps the bytes (Part 3); DynamoDB keeps what we know about them.
     await app.state.s3.upload_fileobj(
         file.file,
         config.bucket_name,
-        document_id,
-        ExtraArgs={
-            "ContentType": content_type,
-            "Metadata": {"filename": file.filename or "unnamed"},
-        }
+        record.document_id,
+        ExtraArgs={"ContentType": record.content_type},
     )
-    return {
-        "document_id": document_id,
-        "filename": file.filename or "unnamed",
-        "content_type": content_type,
-    }
+    await repo.create(record)
+    return record
 
+
+def _encode_token(key: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(key).encode()).decode()
+
+def _decode_token(token: str) -> dict:
+    try:
+        return json.loads(base64.urlsafe_b64decode(token))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid next_token"
+        ) from exc
 
 @app.get("/documents")
 async def list_documents(
-    config: AppConfig = Depends(get_app_config)
-) -> dict[str, list[dict[str, str | int]]]:
+    x_owner: str = Header("demo@example.com", alias="X-Owner"),
+    limit: int = 20,
+    next_token: str | None = None,
+    repo: DocumentRepository = Depends(get_repository),
+) -> dict:
     """
     List documents in the S3 bucket.
     """
-    resp = await app.state.s3.list_objects_v2(Bucket=config.bucket_name)
-    documents = [
-        {
-            "document_id": obj["Key"],
-            "size": obj["Size"],
-            "last_modified": obj["LastModified"].isoformat(),
-        }
-        for obj in resp.get("Contents", [])
-    ]
-    return {"documents": documents}
+    start_key = _decode_token(next_token) if next_token else None
+    records, last_key = await repo.list_by_owner(
+        owner=x_owner,
+        limit=limit,
+        start_key=start_key
+    )
+    return {
+        "documents": records,
+        "next_token": _encode_token(last_key) if last_key else None,
+    }
+
+@app.get("/documents/{document_id}")
+async def get_document(
+    document_id: str,
+    repo: DocumentRepository = Depends(get_repository),
+) -> DocumentRecord:
+    record = await repo.get(document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    return record
+
+@app.get("/documents/{document_id}/history")
+async def get_document_history(
+    document_id: str,
+    repo: DocumentRepository = Depends(get_repository),
+) -> dict:
+    return {"events": await repo.history(document_id)}
+
+
+class StatusChange(RequestModel):
+    to: DocumentStatus
+    detail: str = ""
+
+@app.post("/documents/{document_id}/status")
+async def change_status(
+    document_id: str,
+    change: StatusChange,
+    repo: DocumentRepository = Depends(get_repository),
+) -> DocumentRecord | None:
+    """
+    Simulate the worker's status transition. Debug-only until Part 5.
+    """
+    if not get_settings().debug_routes:
+        raise HTTPException(status_code=404)  # 404, not 403: don't advertise it
+    record = await repo.get(document_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    try:
+        await repo.update_status(
+            document_id=document_id,
+            to_status=change.to,
+            expected=record.status,
+            detail=change.detail,
+        )
+    except StatusConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc)
+        ) from exc
+    return await repo.get(document_id)
 
 
 @app.get("/documents/{document_id}/download")

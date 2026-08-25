@@ -3,11 +3,14 @@ Run with: python -m bootstrap.seed
 Safe to run repeatedly - it converges, it doesn't depulicate.
 """
 import secrets as pysecrets
+from botocore.exceptions import ClientError
+
 from app.aws.clients import get_client
 from app.config import get_settings
 
 PARAMETERS: dict[str, str] = {
     "s3/bucket-name": "inbox-uploads",
+    "dynamodb/table-name": "docinbox",
     "llm/model-name": "llama3.2:3b",
     "features/email-digest": "false",
 }
@@ -68,12 +71,70 @@ def seed_bucket(env: str) -> None:
     print(f" bucket {bucket}: versioning enabled, lifecycle rule applied")
 
 
+def seed_table(env: str) -> None:
+    ddb = get_client("dynamodb")
+    table = PARAMETERS["dynamodb/table-name"]
+    try:
+        ddb.create_table(
+            TableName=table,
+            BillingMode="PAY_PER_REQUEST",
+            AttributeDefinitions=[
+                # Only KEY attributes are declared -
+                # everything else is schemaless.
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+                {"AttributeName": "GSI1PK", "AttributeType": "S"},
+                {"AttributeName": "GSI1SK", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            GlobalSecondaryIndexes=[{
+                "IndexName": "GSI1",
+                "KeySchema": [
+                    {"AttributeName": "GSI1PK", "KeyType": "HASH"},
+                    {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            # The side-quest: record every item change. NEW_AND_OLD_IMAGES
+            # captures the full item before and after each write.
+            StreamSpecification={
+                "StreamEnabled": True,
+                "StreamViewType": "NEW_AND_OLD_IMAGES",
+            },
+        )
+        ddb.get_waiter("table_exists").wait(TableName=table)
+        print(f" table {table} (created)")
+    except ddb.exceptions.ResourceInUseException:
+        print(f" table {table} (already exists, kept)")
+
+    # TTL is configured separately from table creation.
+    try:
+        ddb.update_time_to_live(
+            TableName=table,
+            TimeToLiveSpecification={
+                "AttributeName": "expires_at",
+                "Enabled": True,
+            }
+        )
+        print(f" table {table}: TTL enabled on 'expires_at'")
+    except ClientError as exc:
+        # Re-enabling TTL that's already enabled is a ValidationException,
+        # which is fine for an idempotent seed - anything else is real.
+        if exc.response["Error"]["Code"] != "ValidationException":
+            raise
+    print(f" table {table}: TTL already enabled")
+
+
 def main() -> None:
     env = get_settings().app_env
     print(f"Seeding docinbox resources for env '{env}' ...")
     seed_parameters(env)
     seed_signing_key(env)
     seed_bucket(env)
+    seed_table(env)
     print("Done.")
 
 

@@ -1,0 +1,69 @@
+Meeting notes - Q3 platform review
+Date: 12 August 2026, 10:00-11:15 CET
+Location: Hamburg office, room Elbe (remote dial-in for Dublin)
+
+Attendees
+  - Bob Fischer (platform, chair)
+  - Alice Nguyen (operations)
+  - Daniel Okoro (Northwind Analytics, delivery)
+  - Priya Raman (data engineering)
+  - Marco Bianchi (finance, first half only)
+
+Agenda
+  1. Warehouse migration status
+  2. Dashboard rollout and service levels
+  3. Cost review
+  4. Risks and open decisions
+
+1. Warehouse migration status
+Priya reported the shipment tracking tables are 80% migrated. The two
+remaining tables are the historical customs records (roughly 240 GB) and
+the carrier rate cards. Backfill for the customs data is running nightly
+and should finish by 26 August. Daniel confirmed Northwind will keep the
+old ingest path running in parallel until the first clean week of
+reconciliation, then switch it off.
+
+Open question: whether to keep raw JSON payloads after migration, or
+drop them once the parsed tables are verified. Storage cost is modest,
+but nobody wants to own an unqueryable archive. Deferred to next week.
+
+2. Dashboard rollout and service levels
+The weekly operations dashboard is live for the Hamburg team. Alice
+asked for two changes before the Rotterdam rollout: a per-carrier
+on-time view, and the ability to export a filtered table to CSV. Daniel
+said both fit into the current sprint.
+
+Availability last month was 99.7%, above the 99.5% commitment, so no
+service credits are due. One incident on 4 August (28 minutes) traced
+back to a failed schema change during a deploy; the fix was a migration
+gate in CI, already merged.
+
+3. Cost review
+Marco walked through the monthly run rate. Compute is roughly flat;
+storage is trending up with the backfill and should level off in
+September. He asked for a projection through year end, split between
+the migration (one-off) and the steady-state platform. Priya to send
+numbers by Friday.
+
+4. Risks and open decisions
+  - Carrier rate card format changes in October. Owner: Priya.
+    Mitigation: parser version pinning plus a contract test.
+  - Rotterdam rollout depends on the CSV export work landing.
+    Owner: Daniel. Target: 2 September.
+  - Retention policy for raw payloads is still undecided.
+    Owner: Bob. Bring a written proposal to the next review.
+  - Single on-call engineer for the warehouse. Owner: Bob.
+    Second person to be trained before the Rotterdam go-live.
+
+Actions
+  - Priya: finish customs backfill, send cost projection by Friday
+  - Daniel: per-carrier view + CSV export this sprint
+  - Alice: confirm Rotterdam user list and access requests
+  - Bob: draft retention proposal; start on-call training plan
+  - All: review SOW-01 milestone dates before the next meeting
+
+Next meeting: 26 August 2026, 10:00 CET.
+
+--
+Sample data for the docinbox tutorial (Building a Smart Document Inbox
+on Local AWS, Part 4). All names, figures, and events are fictional.
