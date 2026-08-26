@@ -1,6 +1,7 @@
 import uuid
 import base64
 import json
+import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, File, UploadFile, Header
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -15,6 +16,9 @@ from app.models import DocumentRecord, DocumentStatus
 from app.repository import DocumentRepository, StatusConflictError
 
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail fast: if SSM/Secrets Manager is unreachable or a parameter is
@@ -26,6 +30,17 @@ async def lifespan(app: FastAPI):
     async with AsyncExitStack() as stack:
         app.state.s3 = await open_async_client(stack, "s3")
         app.state.dynamodb = await open_async_client(stack, "dynamodb")
+        # Presigned URLs must name a host the CALLER can resolve, which is not
+        # always the one we call ourselves (in Docker: `ministack` vs the
+        # host's `localhost`). When the two differ, sign with a second client
+        # bound to the public endpoint; it never issues a request, it only
+        # signs. Unset in real AWS -> both names point at the same client.
+        public_endpoint = get_settings().public_aws_endpoint_url
+        app.state.s3_public = (
+            await open_async_client(stack, "s3", endpoint_url=public_endpoint)
+            if public_endpoint
+            else app.state.s3
+        )
         yield
     # the stack closes app.state.s3's aiohttp session on shutdown
 
@@ -239,11 +254,15 @@ async def change_status(
 @app.get("/documents/{document_id}/download")
 async def download_document(
     document_id: str,
-    config: AppConfig = Depends(get_app_config)
+    config: AppConfig = Depends(get_app_config),
+    repo: DocumentRepository = Depends(get_repository),
 ) -> StreamingResponse:
     """
     Generate a presigned URL to download a document from S3.
     """
+    record = await repo.get(document_id)
+    filename = record.filename if record and record.filename else document_id
+    logger.info(f"download_document: document_id={document_id}, filename={filename}")
     try:
         obj = await app.state.s3.get_object(
             Bucket=config.bucket_name,
@@ -255,7 +274,7 @@ async def download_document(
             detail=f"document '{document_id}' not found"
         ) from exc
 
-    filename = obj.get("Metadata", {}).get("filename", document_id)
+    logger.info(f"download_document: S3 object found, filename={filename}")
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     if "ContentLength" in obj:
         headers["Content-Length"] = str(obj["ContentLength"])
@@ -288,7 +307,9 @@ async def download_document_url(
             ) from exc
         raise
 
-    url = await app.state.s3.generate_presigned_url(
+    # Signed by the public-endpoint client: no I/O, just a URL the caller
+    # can follow. head_object above deliberately used the internal one.
+    url = await app.state.s3_public.generate_presigned_url(
         "get_object",
         Params={"Bucket": config.bucket_name, "Key": document_id},
         ExpiresIn=300,

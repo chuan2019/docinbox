@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     # Set to http://localhost:4566 locally; LEAVE UNSET in real AWS
     aws_endpoint_url: str | None = None
+    # Endpoint to sign presigned URLs against - the one the CALLER can reach.
+    # Only needed when the app and the caller see AWS at different addresses:
+    # in Docker the app talks to `ministack:4566`, while a browser or Postman
+    # on the host can only resolve `localhost:4566`. LEAVE UNSET in real AWS
+    # (and for a local `make run`), where the two are the same address.
+    public_aws_endpoint_url: str | None = None
     aws_region: str = "us-east-1"
     aws_access_key_id: str = "test"
     aws_secret_access_key: str = "test"

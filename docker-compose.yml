@@ -12,3 +12,38 @@ services:
     volumes:
       - ./data/state:/tmp/ministack-state
       - ./data/s3:/tmp/ministack-data/s3
+
+  app:
+    # Opt-in: only starts with `--profile app` (see `make docker-up`), so a
+    # plain `docker compose up -d` still brings up MiniStack alone and leaves
+    # the app to local uvicorn (`make run`).
+    profiles: ["app"]
+    build: .
+    ports:
+      - "8000:8000"
+    # Same knobs as a local run; .env is optional (defaults live in config.py).
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Overrides whatever .env says: inside the compose network MiniStack
+      # answers to `ministack`, not to the host's localhost.
+      - AWS_ENDPOINT_URL=http://ministack:4566
+      # ...but a presigned URL is followed by the CALLER, on the host, where
+      # `ministack` does not resolve. Presigned URLs are signed against this
+      # address instead. Unset in real AWS, where both are the same endpoint.
+      - PUBLIC_AWS_ENDPOINT_URL=http://localhost:4566
+    depends_on:
+      ministack:
+        condition: service_healthy
+    # Live reload against the working tree, matching `make run`.
+    volumes:
+      - ./app:/app/app:ro
+      - ./bootstrap:/app/bootstrap:ro
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s

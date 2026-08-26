@@ -17,7 +17,7 @@ from app.config import get_settings
 _S3_ADDRESSING = Config(s3={"addressing_style": "path"})
 _session = aioboto3.Session()
 
-def _client_kwargs() -> dict[str, Any]:
+def _client_kwargs(endpoint_url: str | None = None) -> dict[str, Any]:
     settings = get_settings()
     kwargs: dict[str, Any] = {
         "region_name": settings.aws_region,
@@ -25,16 +25,25 @@ def _client_kwargs() -> dict[str, Any]:
         "aws_secret_access_key": settings.aws_secret_access_key,
         "config": _S3_ADDRESSING,
     }
-    if settings.aws_endpoint_url:
-        kwargs["endpoint_url"] = settings.aws_endpoint_url
+    endpoint = endpoint_url or settings.aws_endpoint_url
+    if endpoint:
+        kwargs["endpoint_url"] = endpoint
     return kwargs
 
-async def open_async_client(stack: AsyncExitStack, service: str) -> Any:
+async def open_async_client(
+    stack: AsyncExitStack,
+    service: str,
+    endpoint_url: str | None = None,
+) -> Any:
     """
     Open an async client for `service`, tied to `stack`'s lifetime.
     Call this once (the app lifespan does) and reuse the client it
     returns - aioboto3 clients are not meant to be opened per request.
+
+    `endpoint_url` overrides the configured endpoint for this client only.
+    The presigning client uses it so that the URLs it signs name a host the
+    caller can actually resolve.
     """
     return await stack.enter_async_context(
-        _session.client(service, **_client_kwargs())
+        _session.client(service, **_client_kwargs(endpoint_url))
     )

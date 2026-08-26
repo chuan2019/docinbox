@@ -1,0 +1,11 @@
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Never bake local config/state into the image - compose injects env at run time.
+.env
+data/
+assets/
+docs/
+tests/
