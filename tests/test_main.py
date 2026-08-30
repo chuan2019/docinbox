@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from pydantic import SecretStr
 
 from app.app_config import AppConfig
-from app.main import app, get_repository
+from app.main import _verify_table, app, get_repository
 from app.repository import DocumentRepository
 
 
@@ -118,3 +118,50 @@ def test_get_repository_is_unavailable_before_startup(monkeypatch):
 def test_get_repository_builds_a_repository_after_startup(client):
     """The `client` fixture runs the lifespan, so the client is live."""
     assert isinstance(get_repository(config=_config()), DocumentRepository)
+
+
+def test_verify_table_rejects_a_missing_table(aws):
+    with pytest.raises(RuntimeError, match="does not exist"):
+        _verify_table("docinbox")
+
+
+def test_verify_table_rejects_a_table_without_gsi1(aws):
+    """list_by_owner queries GSI1, so a table without it is only half-usable."""
+    from app.aws.clients import get_client
+
+    get_client("dynamodb").create_table(
+        TableName="no-index",
+        BillingMode="PAY_PER_REQUEST",
+        AttributeDefinitions=[{"AttributeName": "PK", "AttributeType": "S"}],
+        KeySchema=[{"AttributeName": "PK", "KeyType": "HASH"}],
+    )
+
+    with pytest.raises(RuntimeError, match="no GSI1"):
+        _verify_table("no-index")
+
+
+def test_verify_table_accepts_the_seeded_table(aws):
+    from app.config import get_settings
+    from bootstrap.seed import seed_table
+
+    seed_table(get_settings().app_env)
+    _verify_table("docinbox")  # does not raise
+
+
+def test_app_does_not_start_without_the_table(aws):
+    """
+    The point of the check: a missing table stops the app at boot, rather
+    than returning ResourceNotFoundException from every request.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from bootstrap.seed import seed_parameters, seed_signing_key
+
+    env = get_settings().app_env
+    seed_parameters(env)
+    seed_signing_key(env)
+
+    with pytest.raises(RuntimeError, match="does not exist"):
+        with TestClient(app):
+            pass

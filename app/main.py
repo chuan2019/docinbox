@@ -19,13 +19,45 @@ from app.repository import DocumentRepository, StatusConflictError
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+def _verify_table(table_name: str) -> None:
+    """
+    Fail fast if the table is missing or lacks the index we query.
+
+    The name is well-formed by now (AppConfig validates the pattern), but
+    a well-formed name for a table that isn't there is a
+    ResourceNotFoundException on every single request. This runs once, at
+    startup, so it uses the sync client like the SSM and Secrets Manager
+    fetches do - nothing here is worth overlapping.
+    """
+    ddb = get_client("dynamodb")
+    try:
+        table = ddb.describe_table(TableName=table_name)["Table"]
+    except ddb.exceptions.ResourceNotFoundException as exc:
+        raise RuntimeError(
+            f"DynamoDB table '{table_name}' does not exist - "
+            "run `python -m bootstrap.seed`"
+        ) from exc
+    # list_by_owner queries GSI1; without it every list request would fail
+    # with a ValidationException that names neither the table nor the fix.
+    indexes = {
+        i["IndexName"] for i in table.get("GlobalSecondaryIndexes") or []
+    }
+    if "GSI1" not in indexes:
+        raise RuntimeError(
+            f"DynamoDB table '{table_name}' has no GSI1 index - "
+            "run `python -m bootstrap.seed`"
+        )
+    logger.info("table %s ready (indexes: %s)", table_name, ", ".join(sorted(indexes)))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail fast: if SSM/Secrets Manager is unreachable or a parameter is
     # missing, the app fails at startup instead of at request time.
     cache = ConfigCache(ttl_seconds=get_settings().config_ttl_seconds)
-    cache.get()  # first fetch happens here, at startup
+    config = cache.get()  # first fetch happens here, at startup
     app.state.config_cache = cache
+    _verify_table(config.table_name)
 
     async with AsyncExitStack() as stack:
         app.state.s3 = await open_async_client(stack, "s3")
