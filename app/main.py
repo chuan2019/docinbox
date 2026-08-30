@@ -55,7 +55,15 @@ def get_app_config() -> AppConfig:
 
 def get_repository(config: AppConfig = Depends(get_app_config)) -> DocumentRepository:
     """FastAPI dependency: a repository bound to the live client + table name."""
-    return DocumentRepository(app.state.dynamodb, config.table_name)
+    # app.state.dynamodb only exists once the lifespan has run; without this
+    # the miss is a bare AttributeError 500 from inside the dependency.
+    client = getattr(app.state, "dynamodb", None)
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="DynamoDB client unavailable - app startup did not complete",
+        )
+    return DocumentRepository(client, config.table_name)
 
 
 @app.get("/whoami")

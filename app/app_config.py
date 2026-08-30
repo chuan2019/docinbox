@@ -4,15 +4,18 @@ Bootstrap settings (endpoint, region, env) come from the environment -
 see config.py. Everything here comes from AWS at runtime.
 """
 import time
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 from app.aws.clients import get_client
 from app.config import get_settings
+from app.repository import TABLE_NAME_PATTERN
 
 
 class AppConfig(BaseModel):
     """Validated application configuration."""
     bucket_name: str
-    table_name: str
+    # A plain `str` accepts "" and "   ", which only fail once a request
+    # reaches DynamoDB. The pattern moves that failure to startup.
+    table_name: str = Field(pattern=TABLE_NAME_PATTERN)
     llm_model: str
     email_digest_enabled: bool
     signing_key: SecretStr  # renders as '**********' in logs and repr

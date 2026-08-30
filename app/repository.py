@@ -7,10 +7,14 @@ Key design (the whole single-table layout, in one place):
                                                     GSI1SK=UPLOADED#<iso-ts>#<id>
     status event:   PK=DOC#<id> SK=EVENT#<iso-ts>   (no GSI keys - sparse)
 """
+import re
 from datetime import timedelta
 from typing import Any
 
+from aiobotocore.client import AioBaseClient
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
+from botocore.client import BaseClient
+from botocore.exceptions import ClientError
 
 from app.models import (
     VALID_TRANSITIONS,
@@ -24,6 +28,17 @@ _ser = TypeSerializer()
 _de  = TypeDeserializer()
 
 EVENT_TTL = timedelta(days=7) # status events clean themselves up
+
+# DynamoDB's own rule: 3-255 chars of [A-Za-z0-9_.-]. botocore only checks
+# 1-1024, so a too-short or oddly punctuated name would otherwise pass
+# client-side validation and fail at the service - one wasted round trip
+# per request, forever. app_config imports this so bad config dies at startup.
+TABLE_NAME_PATTERN = r"^[A-Za-z0-9_.-]{3,255}$"
+_TABLE_NAME_RE = re.compile(TABLE_NAME_PATTERN)
+
+# The client methods this repository calls. Checked up front so a wrong
+# object fails at construction, not halfway through a request.
+_REQUIRED_CLIENT_METHODS = ("get_item", "put_item", "query", "transact_write_items")
 
 
 def _marshal(data: dict[str, Any]) -> dict[str, Any]:
@@ -39,6 +54,74 @@ def _unmarshal(item: dict[str, Any]) -> dict[str, Any]:
     return {k: _de.deserialize(v) for k, v in item.items()}
 
 
+def _check_client(client: Any) -> None:
+    """
+    Reject anything that cannot serve this repository's calls.
+
+    A real botocore client can be identified exactly; anything else (a
+    fake, a mock) only gets duck-typed on the methods we actually call.
+    """
+    missing = [
+        name for name in _REQUIRED_CLIENT_METHODS
+        if not callable(getattr(client, name, None))
+    ]
+    if missing:
+        raise TypeError(
+            f"client is missing {', '.join(missing)} - "
+            f"expected a DynamoDB client, got {type(client).__name__}"
+        )
+    if not isinstance(client, BaseClient):
+        return  # a test double; the duck-type check above is all we can do
+    if not isinstance(client, AioBaseClient):
+        # Sync clients have every method we need, so nothing complains
+        # until `await <dict>` raises TypeError deep inside a request.
+        raise TypeError(
+            "client is a synchronous boto3 client; this repository awaits "
+            "its calls. Use app.aws.aclients.open_async_client instead."
+        )
+    service = client.meta.service_model.service_name
+    if service != "dynamodb":
+        raise TypeError(f"client is for '{service}', expected 'dynamodb'")
+
+
+def _check_table_name(table_name: str) -> None:
+    if not isinstance(table_name, str):
+        raise TypeError(
+            f"table_name must be a str, got {type(table_name).__name__}"
+        )
+    if not _TABLE_NAME_RE.match(table_name):
+        raise ValueError(
+            f"invalid DynamoDB table name {table_name!r}: expected 3-255 "
+            "characters from [A-Za-z0-9_.-]"
+        )
+
+
+def _error_code(exc: BaseException) -> str | None:
+    """The AWS error code on a ClientError, if it carries one."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return None
+    return response.get("Error", {}).get("Code")
+
+
+def _conflict_exception(client: Any) -> type[BaseException]:
+    """
+    Resolve TransactionCanceledException once, at construction.
+
+    Reading it inside the `except` clause instead means a client that lacks
+    the attribute raises AttributeError *while handling* the real error,
+    masking it - and a MagicMock resolves it to a non-class, which makes
+    `except` itself raise TypeError. Falling back to ClientError keeps the
+    handler valid; update_status then filters on the error code.
+    """
+    exc = getattr(
+        getattr(client, "exceptions", None), "TransactionCanceledException", None
+    )
+    if isinstance(exc, type) and issubclass(exc, BaseException):
+        return exc
+    return ClientError
+
+
 class StatusConflictError(Exception):
     """
     The document was not in the expected status (a lost race, or an
@@ -49,8 +132,19 @@ class StatusConflictError(Exception):
 class DocumentRepository:
 
     def __init__(self, client: Any, table_name: str) -> None:
+        """
+        `client` must be an *async* DynamoDB client - see app.aws.aclients.
+        Both arguments are checked here rather than trusted, because every
+        way they can be wrong otherwise surfaces mid-request, as a 500 from
+        a route that has no handler for it.
+        """
+        _check_client(client)
+        _check_table_name(table_name)
         self._c = client
         self._table = table_name
+        # Pinned now, not inside the except clause - see _conflict_exception.
+        self._conflict_exc = _conflict_exception(client)
+        self._conflict_is_typed = self._conflict_exc is not ClientError
 
     # - item shapes - - - - - - - - - - - - - - - - - - - - - - - - - -
     @staticmethod
@@ -191,7 +285,13 @@ class DocumentRepository:
                     },
                 ]
             )
-        except self._c.exceptions.TransactionCanceledException as exc:
+        except self._conflict_exc as exc:
+            # On the ClientError fallback the class is far broader than the
+            # one error we translate, so everything else keeps propagating.
+            if not self._conflict_is_typed and _error_code(exc) != (
+                "TransactionCanceledException"
+            ):
+                raise
             raise StatusConflictError(
                 f"document {document_id} was not in status '{expected.value}'"
             ) from exc

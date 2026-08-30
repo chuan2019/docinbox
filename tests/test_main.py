@@ -1,6 +1,13 @@
 from unittest.mock import MagicMock
 
+import pytest
 from botocore.exceptions import ClientError
+from fastapi import HTTPException
+from pydantic import SecretStr
+
+from app.app_config import AppConfig
+from app.main import app, get_repository
+from app.repository import DocumentRepository
 
 
 def test_healthz_ok_when_aws_reachable(client):
@@ -82,3 +89,32 @@ def test_delete_bucket_conflicts_when_not_empty(client):
     assert resp.status_code == 409
     assert "not empty" in resp.json()["detail"]
     assert client.get("/buckets").json() == {"buckets": ["my-bucket"]}
+
+
+def _config() -> AppConfig:
+    return AppConfig(
+        bucket_name="inbox-uploads",
+        table_name="docinbox",
+        llm_model="claude-opus-5",
+        email_digest_enabled=False,
+        signing_key=SecretStr("k"),
+    )
+
+
+def test_get_repository_is_unavailable_before_startup(monkeypatch):
+    """
+    app.state.dynamodb only exists once the lifespan has run. Reading it
+    unguarded made that a bare AttributeError 500 from inside a dependency.
+    """
+    monkeypatch.delattr(app.state, "dynamodb", raising=False)
+
+    with pytest.raises(HTTPException) as excinfo:
+        get_repository(config=_config())
+
+    assert excinfo.value.status_code == 503
+    assert "startup" in excinfo.value.detail
+
+
+def test_get_repository_builds_a_repository_after_startup(client):
+    """The `client` fixture runs the lifespan, so the client is live."""
+    assert isinstance(get_repository(config=_config()), DocumentRepository)
