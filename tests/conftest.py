@@ -38,16 +38,23 @@ def client(aws):
     """FastAPI TestClient wired to the moto-mocked AWS backend.
 
     The lifespan loads AppConfig from SSM + Secrets Manager and verifies
-    the DynamoDB table at startup, so the mocked backend must be seeded
-    before the app boots.
+    the table and bucket at startup, so the mocked backend must be fully
+    seeded before the app boots - exactly what `make seed` does for a real
+    environment.
     """
-    from bootstrap.seed import seed_parameters, seed_signing_key, seed_table
+    from bootstrap.seed import (
+        seed_bucket,
+        seed_parameters,
+        seed_signing_key,
+        seed_table,
+    )
     from app.main import app
 
     env = get_settings().app_env
     seed_parameters(env)
     seed_signing_key(env)
     seed_table(env)
+    seed_bucket(env)
 
     with TestClient(app) as test_client:
         yield test_client

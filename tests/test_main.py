@@ -6,8 +6,12 @@ from fastapi import HTTPException
 from pydantic import SecretStr
 
 from app.app_config import AppConfig
-from app.main import _verify_table, app, get_repository
+from app.main import _verify_bucket, _verify_table, app, get_repository
 from app.repository import DocumentRepository
+
+# Startup requires the configured uploads bucket, so the fixture seeds it
+# and it shows up in every listing below - no clean slate here.
+SEEDED = "inbox-uploads"
 
 
 def test_healthz_ok_when_aws_reachable(client):
@@ -53,13 +57,14 @@ def test_list_buckets_reports_created_buckets(client):
     resp = client.get("/buckets")
 
     assert resp.status_code == 200
-    assert set(resp.json()["buckets"]) == {"alpha", "beta"}
+    assert set(resp.json()["buckets"]) == {SEEDED, "alpha", "beta"}
 
 
-def test_list_buckets_empty_when_none_created(client):
+def test_list_buckets_reports_only_the_seeded_bucket_at_first(client):
+    """Was 'empty when none created' - startup now requires one bucket."""
     resp = client.get("/buckets")
     assert resp.status_code == 200
-    assert resp.json() == {"buckets": []}
+    assert resp.json() == {"buckets": [SEEDED]}
 
 
 def test_delete_bucket(client):
@@ -69,7 +74,7 @@ def test_delete_bucket(client):
 
     assert resp.status_code == 200
     assert resp.json() == {"deleted": "my-bucket"}
-    assert client.get("/buckets").json() == {"buckets": []}
+    assert client.get("/buckets").json() == {"buckets": [SEEDED]}
 
 
 def test_delete_bucket_is_idempotent_when_missing(client):
@@ -88,7 +93,7 @@ def test_delete_bucket_conflicts_when_not_empty(client):
 
     assert resp.status_code == 409
     assert "not empty" in resp.json()["detail"]
-    assert client.get("/buckets").json() == {"buckets": ["my-bucket"]}
+    assert set(client.get("/buckets").json()["buckets"]) == {SEEDED, "my-bucket"}
 
 
 def _config() -> AppConfig:
@@ -163,5 +168,53 @@ def test_app_does_not_start_without_the_table(aws):
     seed_signing_key(env)
 
     with pytest.raises(RuntimeError, match="does not exist"):
+        with TestClient(app):
+            pass
+
+
+def test_verify_bucket_rejects_a_missing_bucket(aws):
+    with pytest.raises(RuntimeError, match="does not exist"):
+        _verify_bucket(SEEDED)
+
+
+def test_verify_bucket_accepts_the_seeded_bucket(aws):
+    from app.config import get_settings
+    from bootstrap.seed import seed_bucket
+
+    seed_bucket(get_settings().app_env)
+    _verify_bucket(SEEDED)  # does not raise
+
+
+def test_verify_bucket_propagates_errors_that_are_not_absence(aws, monkeypatch):
+    """A 403 is not 'run make seed' - it must not be relabelled as absence."""
+    from botocore.exceptions import ClientError
+
+    import app.main as main
+
+    s3 = MagicMock()
+    s3.head_bucket.side_effect = ClientError(
+        {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadBucket"
+    )
+    monkeypatch.setattr(main, "get_client", lambda _service: s3)
+
+    with pytest.raises(ClientError):
+        _verify_bucket(SEEDED)
+
+
+def test_app_does_not_start_without_the_bucket(aws):
+    """
+    Same contract as the table: `make seed` provisions, the app verifies.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from bootstrap.seed import seed_parameters, seed_signing_key, seed_table
+
+    env = get_settings().app_env
+    seed_parameters(env)
+    seed_signing_key(env)
+    seed_table(env)  # everything except the bucket
+
+    with pytest.raises(RuntimeError, match="S3 bucket .* does not exist"):
         with TestClient(app):
             pass

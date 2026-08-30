@@ -35,7 +35,7 @@ def _verify_table(table_name: str) -> None:
     except ddb.exceptions.ResourceNotFoundException as exc:
         raise RuntimeError(
             f"DynamoDB table '{table_name}' does not exist - "
-            "run `python -m bootstrap.seed`"
+            "run `make seed` or `python -m bootstrap.seed`"
         ) from exc
     # list_by_owner queries GSI1; without it every list request would fail
     # with a ValidationException that names neither the table nor the fix.
@@ -45,9 +45,31 @@ def _verify_table(table_name: str) -> None:
     if "GSI1" not in indexes:
         raise RuntimeError(
             f"DynamoDB table '{table_name}' has no GSI1 index - "
-            "run `python -m bootstrap.seed`"
+            "run `make seed` or `python -m bootstrap.seed`"
         )
     logger.info("table %s ready (indexes: %s)", table_name, ", ".join(sorted(indexes)))
+
+
+def _verify_bucket(bucket_name: str) -> None:
+    """
+    Fail fast if the uploads bucket is missing.
+
+    Provisioning belongs to `make seed`, not to the app: a bucket the app
+    invented for itself would have neither versioning nor the lifecycle
+    rule, so a missing one means this environment was never seeded - and
+    booting anyway only moves the failure to the first upload.
+    """
+    s3 = get_client("s3")
+    try:
+        s3.head_bucket(Bucket=bucket_name)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("404", "NoSuchBucket"):
+            raise RuntimeError(
+                f"S3 bucket '{bucket_name}' does not exist - "
+                "run `make seed` or `python -m bootstrap.seed`"
+            ) from exc
+        raise  # 403, a name someone else owns, S3 unreachable - not ours
+    logger.info("bucket %s ready", bucket_name)
 
 
 @asynccontextmanager
@@ -58,6 +80,7 @@ async def lifespan(app: FastAPI):
     config = cache.get()  # first fetch happens here, at startup
     app.state.config_cache = cache
     _verify_table(config.table_name)
+    _verify_bucket(config.bucket_name)
 
     async with AsyncExitStack() as stack:
         app.state.s3 = await open_async_client(stack, "s3")
